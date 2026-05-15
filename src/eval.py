@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+from pathlib import Path
+from typing import Any
+
+import torch
+from torch.utils.data import DataLoader
+
+from src.data.speech_commands import ALL_LABELS, SpeechCommandsKWS
+from src.features.logmel import LogMelExtractor
+from src.models.small_cnn import SmallCNN
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate a trained SmallCNN KWS checkpoint.")
+    parser.add_argument("--ckpt", required=True, help="Checkpoint path, e.g. outputs/best.pt.")
+    parser.add_argument("--data-root", default=None, help="Override dataset root.")
+    parser.add_argument("--limit", type=int, default=None, help="Limit real test examples.")
+    parser.add_argument("--batch-size", type=int, default=32, help="Evaluation batch size.")
+    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers.")
+    parser.add_argument("--no-download", action="store_true", help="Disable torchaudio dataset download.")
+    return parser.parse_args()
+
+
+def load_checkpoint(path: str | Path) -> dict[str, Any]:
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
+def write_confusion_csv(path: Path, labels: list[str], matrix: list[list[int]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["true_label", *labels])
+        for label, row in zip(labels, matrix):
+            writer.writerow([label, *row])
+
+
+def main() -> None:
+    args = parse_args()
+    checkpoint = load_checkpoint(args.ckpt)
+    labels = list(checkpoint.get("labels", ALL_LABELS))
+    data_cfg = dict(checkpoint.get("data_config", {}))
+    feature_cfg = dict(checkpoint.get("feature_config", {}))
+    model_cfg = dict(checkpoint.get("model_config", {}))
+
+    if args.data_root is not None:
+        data_cfg["data_root"] = args.data_root
+
+    test_dataset = SpeechCommandsKWS(
+        data_root=data_cfg.get("data_root", "data/SpeechCommands"),
+        subset="testing",
+        sample_rate=int(data_cfg.get("sample_rate", 16_000)),
+        num_samples=int(data_cfg.get("num_samples", 16_000)),
+        limit=args.limit,
+        download=not args.no_download,
+        silence_ratio=float(data_cfg.get("silence_ratio", 0.05)),
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=False,
+    )
+
+    device = torch.device("cpu")
+    feature_extractor = LogMelExtractor(**feature_cfg).to(device)
+    model = SmallCNN(
+        num_classes=int(model_cfg.get("num_classes", len(labels))),
+        dropout=float(model_cfg.get("dropout", 0.1)),
+    ).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    num_classes = len(labels)
+    matrix = [[0 for _ in range(num_classes)] for _ in range(num_classes)]
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for waveforms, targets in test_loader:
+            waveforms = waveforms.to(device)
+            targets = targets.to(device)
+            logits = model(feature_extractor(waveforms))
+            preds = logits.argmax(dim=1)
+            correct += int((preds == targets).sum().item())
+            total += int(targets.numel())
+            for true_idx, pred_idx in zip(targets.tolist(), preds.tolist()):
+                matrix[int(true_idx)][int(pred_idx)] += 1
+
+    test_accuracy = correct / total if total else 0.0
+    per_class_accuracy: dict[str, float | None] = {}
+    for idx, label in enumerate(labels):
+        row_total = sum(matrix[idx])
+        per_class_accuracy[label] = matrix[idx][idx] / row_total if row_total else None
+
+    outputs_dir = Path("outputs")
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    confusion_path = outputs_dir / "confusion_matrix.csv"
+    write_confusion_csv(confusion_path, labels, matrix)
+
+    metrics_path = outputs_dir / "metrics.json"
+    if metrics_path.exists():
+        with metrics_path.open("r", encoding="utf-8") as file:
+            metrics = json.load(file)
+    else:
+        metrics = {}
+    metrics["test_accuracy"] = test_accuracy
+    metrics["per_class_accuracy"] = per_class_accuracy
+    metrics["confusion_matrix_csv"] = str(confusion_path)
+    with metrics_path.open("w", encoding="utf-8") as file:
+        json.dump(metrics, file, indent=2)
+
+    print(f"test_accuracy={test_accuracy:.4f}")
+    print("per_class_accuracy:")
+    for label in labels:
+        value = per_class_accuracy[label]
+        text = "null" if value is None else f"{value:.4f}"
+        print(f"  {label}: {text}")
+    print(f"saved confusion matrix: {confusion_path}")
+    print(f"updated metrics: {metrics_path}")
+
+
+if __name__ == "__main__":
+    main()

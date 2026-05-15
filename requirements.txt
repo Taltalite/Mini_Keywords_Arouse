@@ -1,0 +1,11 @@
+torch
+torchaudio
+numpy
+scipy
+scikit-learn
+pyyaml
+onnx
+onnxruntime
+onnxruntime-tools
+pandas
+tqdm
