@@ -9,11 +9,11 @@ from typing import Any
 import torch
 import yaml
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from src.data.speech_commands import ALL_LABELS, SpeechCommandsKWS
 from src.features.logmel import LogMelExtractor
-from src.models.small_cnn import SmallCNN, count_parameters
+from src.models import build_model, count_parameters, normalize_model_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,6 +63,29 @@ def evaluate(
     return correct / total if total else 0.0
 
 
+def build_weighted_sampler(dataset: SpeechCommandsKWS) -> WeightedRandomSampler:
+    targets = dataset.target_indices()
+    counts = {idx: 0 for idx in range(len(ALL_LABELS))}
+    for target in targets:
+        counts[int(target)] += 1
+    weights = [1.0 / counts[int(target)] if counts[int(target)] else 0.0 for target in targets]
+    return WeightedRandomSampler(
+        weights=torch.as_tensor(weights, dtype=torch.double),
+        num_samples=len(weights),
+        replacement=True,
+    )
+
+
+def build_class_weights(label_counts: dict[str, int], device: torch.device) -> torch.Tensor:
+    total = sum(label_counts.values())
+    num_classes = len(ALL_LABELS)
+    weights = []
+    for label in ALL_LABELS:
+        count = label_counts[label]
+        weights.append(total / (num_classes * count) if count else 0.0)
+    return torch.tensor(weights, dtype=torch.float32, device=device)
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
@@ -107,12 +130,25 @@ def main() -> None:
         seed=seed + 1,
     )
 
+    train_label_counts = train_dataset.label_counts()
+    use_weighted_sampler = bool(train_cfg.get("use_weighted_sampler", False))
+    use_class_weighted_loss = bool(train_cfg.get("use_class_weighted_loss", False))
+    sampler = build_weighted_sampler(train_dataset) if use_weighted_sampler else None
+    sampler_type = "weighted_random" if sampler is not None else "shuffle"
+
+    print("train_class_counts:")
+    for label in ALL_LABELS:
+        print(f"  {label}: {train_label_counts[label]}")
+    print(f"sampler: {sampler_type}")
+    print(f"use_class_weighted_loss: {use_class_weighted_loss}")
+
     batch_size = int(train_cfg.get("batch_size", 32))
     num_workers = int(train_cfg.get("num_workers", 0))
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=False,
     )
@@ -125,12 +161,11 @@ def main() -> None:
     )
 
     feature_extractor = LogMelExtractor(**feature_cfg).to(device)
-    model = SmallCNN(
-        num_classes=int(model_cfg.get("num_classes", len(ALL_LABELS))),
-        dropout=float(model_cfg.get("dropout", 0.1)),
-    ).to(device)
+    model_cfg = normalize_model_config(model_cfg, feature_cfg)
+    model = build_model(model_cfg, feature_cfg).to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    class_weights = build_class_weights(train_label_counts, device) if use_class_weighted_loss else None
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=float(train_cfg.get("learning_rate", 1e-3)),
@@ -145,8 +180,15 @@ def main() -> None:
         "val_accuracy": [],
         "best_val_accuracy": None,
         "num_parameters": count_parameters(model),
+        "model_name": model_cfg["name"],
         "epochs": epochs,
         "limit": args.limit,
+        "sampler": {
+            "type": sampler_type,
+            "use_weighted_sampler": use_weighted_sampler,
+            "use_class_weighted_loss": use_class_weighted_loss,
+            "train_class_counts": train_label_counts,
+        },
     }
 
     best_val = -1.0
@@ -186,10 +228,7 @@ def main() -> None:
             metrics["best_val_accuracy"] = val_acc
             checkpoint = {
                 "model_state_dict": model.state_dict(),
-                "model_config": {
-                    "num_classes": int(model_cfg.get("num_classes", len(ALL_LABELS))),
-                    "dropout": float(model_cfg.get("dropout", 0.1)),
-                },
+                "model_config": model_cfg,
                 "feature_config": feature_cfg,
                 "data_config": data_cfg,
                 "labels": list(ALL_LABELS),

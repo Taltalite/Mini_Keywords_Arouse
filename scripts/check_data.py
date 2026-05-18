@@ -71,6 +71,7 @@ def main() -> None:
     splits = ("training", "validation", "testing")
     split_summaries: dict[str, Any] = {}
     datasets: dict[str, SpeechCommandsKWS] = {}
+    warnings: list[str] = []
 
     for offset, split in enumerate(splits):
         dataset = make_dataset(
@@ -84,11 +85,16 @@ def main() -> None:
             raise RuntimeError(f"{split} dataset is empty.")
         datasets[split] = dataset
         counts = summarize_labels(dataset)
+        missing_labels = [label for label in ALL_LABELS if counts[label] == 0]
+        for label in missing_labels:
+            warnings.append(f"{split}: label '{label}' has 0 examples after limit={args.limit}")
         real_examples = len(dataset.indices)
         split_summaries[split] = {
             "real_examples": real_examples,
             "examples_including_silence": len(dataset),
             "class_distribution": counts,
+            "limit_class_counts": counts,
+            "missing_labels": missing_labels,
         }
 
     train_loader = DataLoader(
@@ -111,6 +117,7 @@ def main() -> None:
         "fixed_waveform_length": int(data_cfg.get("num_samples", 16_000)),
         "label_mapping": label_mapping,
         "splits": split_summaries,
+        "warnings": warnings,
         "batch": {
             "batch_size": int(waveforms.shape[0]),
             "waveform_shape": list(waveforms.shape),
@@ -142,6 +149,10 @@ def main() -> None:
         print("    class_distribution:")
         for label in ALL_LABELS:
             print(f"      {label}: {split_summary['class_distribution'][label]}")
+        for warning in split_summary["missing_labels"]:
+            print(f"    warning: label '{warning}' has 0 examples after limit={args.limit}")
+    for warning in warnings:
+        print(f"WARNING: {warning}")
     print(f"batch_waveform_shape: {tuple(waveforms.shape)}")
     print(f"batch_logmel_feature_shape: {tuple(features.shape)}")
     print(f"saved data summary: {output_path}")

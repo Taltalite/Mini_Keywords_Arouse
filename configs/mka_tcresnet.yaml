@@ -17,8 +17,12 @@ features:
   normalize: true
 
 model:
-  name: small_cnn
+  name: tc_resnet
   num_classes: 12
+  n_mels: 40
+  channels: 48
+  num_blocks: 4
+  kernel_size: 9
   dropout: 0.1
 
 train:

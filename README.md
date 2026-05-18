@@ -54,6 +54,29 @@ This checks data loading and feature shape, trains `SmallCNN`, saves
 `outputs/best.pt`, writes `outputs/metrics.json`, and produces
 `outputs/confusion_matrix_validation.csv`.
 
+## ONNX Export
+
+Export the trained `SmallCNN` checkpoint and validate the exported model with
+ONNX Runtime:
+
+```bash
+python -m src.export_onnx \
+  --ckpt outputs/best.pt \
+  --config configs/mka_smallcnn.yaml \
+  --out outputs/model.onnx
+```
+
+The same command is available as:
+
+```bash
+bash scripts/export_onnx.sh
+```
+
+The export step infers the actual log-Mel input shape with the feature
+extractor, writes `outputs/model.onnx`, runs one ONNX Runtime CPU dummy
+inference, and saves real numerical comparison results to
+`outputs/onnx_check.json`.
+
 ## First-Stage Smoke Tests
 
 Check dataset loading and feature shape:

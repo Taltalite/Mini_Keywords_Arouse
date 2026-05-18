@@ -118,6 +118,20 @@ class SpeechCommandsKWS(Dataset):
     def __len__(self) -> int:
         return len(self.indices) + len(self.silence_items)
 
+    def target_indices(self) -> list[int]:
+        targets: list[int] = []
+        for dataset_index in self.indices:
+            _, _, label, _, _ = self.dataset.get_metadata(dataset_index)
+            targets.append(label_to_index(str(label)))
+        targets.extend([LABEL_TO_INDEX["silence"]] * len(self.silence_items))
+        return targets
+
+    def label_counts(self) -> dict[str, int]:
+        counts = {label: 0 for label in ALL_LABELS}
+        for target in self.target_indices():
+            counts[ALL_LABELS[target]] += 1
+        return counts
+
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
         if idx < 0 or idx >= len(self):
             raise IndexError(idx)
@@ -189,6 +203,8 @@ class SpeechCommandsKWS(Dataset):
 
 def summarize_labels(dataset: Iterable[tuple[torch.Tensor, int]]) -> dict[str, int]:
     counts = {label: 0 for label in ALL_LABELS}
+    if isinstance(dataset, SpeechCommandsKWS):
+        return dataset.label_counts()
     for _, target in dataset:
         counts[ALL_LABELS[int(target)]] += 1
     return counts
