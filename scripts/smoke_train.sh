@@ -2,6 +2,7 @@
 set -euo pipefail
 
 RUN_DIR="outputs/smoke_train_$(date +%Y%m%d_%H%M%S)"
+EVAL_DIR="$RUN_DIR/eval_validation"
 
 python -m src.train --config configs/mka_smallcnn.yaml --limit 200 --epochs 1 --output "$RUN_DIR"
-python -m src.eval --ckpt "$RUN_DIR/best.pt" --subset validation --limit 100
+python -m src.eval --ckpt "$RUN_DIR/best.pt" --subset validation --limit 100 --output "$EVAL_DIR"

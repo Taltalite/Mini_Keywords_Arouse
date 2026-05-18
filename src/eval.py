@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None, help="Limit real evaluation examples.")
     parser.add_argument("--batch-size", type=int, default=32, help="Evaluation batch size.")
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers.")
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Optional evaluation output directory. It must be absent or empty when provided.",
+    )
     parser.add_argument("--no-download", action="store_true", help="Disable torchaudio dataset download.")
     return parser.parse_args()
 
@@ -53,8 +59,64 @@ def mean_available(values: list[float | None]) -> float | None:
     return sum(available) / len(available)
 
 
+def build_silence_error_analysis(
+    labels: list[str],
+    matrix: list[list[int]],
+    subset: str,
+    limit: int | None,
+) -> dict[str, Any]:
+    silence_idx = labels.index("silence")
+    silence_row = matrix[silence_idx]
+    total = sum(silence_row)
+    predicted_as = {
+        label: {
+            "count": int(count),
+            "ratio": (count / total if total else None),
+        }
+        for label, count in zip(labels, silence_row)
+    }
+    top_predictions = sorted(
+        (
+            {
+                "label": label,
+                "count": int(count),
+                "ratio": (count / total if total else None),
+            }
+            for label, count in zip(labels, silence_row)
+        ),
+        key=lambda item: item["count"],
+        reverse=True,
+    )
+    unknown_count = silence_row[labels.index("unknown")]
+    return {
+        "subset": subset,
+        "limit": limit,
+        "silence_ground_truth_count": int(total),
+        "silence_correct_count": int(silence_row[silence_idx]),
+        "silence_accuracy": (silence_row[silence_idx] / total if total else None),
+        "silence_confusion_row": {label: int(count) for label, count in zip(labels, silence_row)},
+        "silence_predicted_as": predicted_as,
+        "silence_top3_predictions": top_predictions[:3],
+        "silence_predicted_unknown_count": int(unknown_count),
+        "silence_predicted_unknown_ratio": (unknown_count / total if total else None),
+        "silence_mainly_predicted_as_unknown": bool(total and unknown_count / total >= 0.5),
+    }
+
+
 def main() -> None:
     args = parse_args()
+    output_dir = Path(args.output) if args.output is not None else Path("outputs")
+    if args.output is not None:
+        if output_dir.exists() and not output_dir.is_dir():
+            print(f"error: --output must be a directory path, got existing file: {output_dir}")
+            sys.exit(-1)
+        if output_dir.exists() and any(output_dir.iterdir()):
+            print(
+                f"warning: output directory is not empty and files may be overwritten: {output_dir}"
+            )
+            sys.exit(-1)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     checkpoint = load_checkpoint(args.ckpt)
     labels = list(checkpoint.get("labels", ALL_LABELS))
     data_cfg = dict(checkpoint.get("data_config", {}))
@@ -72,6 +134,8 @@ def main() -> None:
         limit=args.limit,
         download=not args.no_download,
         silence_ratio=float(data_cfg.get("silence_ratio", 0.05)),
+        silence_gain_min=float(data_cfg.get("silence_gain_min", 0.0)),
+        silence_gain_max=float(data_cfg.get("silence_gain_max", 0.001)),
     )
     eval_loader = DataLoader(
         eval_dataset,
@@ -122,11 +186,9 @@ def main() -> None:
         [value for label, value in per_class_accuracy.items() if label != "unknown"]
     )
 
-    outputs_dir = Path("outputs")
-    outputs_dir.mkdir(parents=True, exist_ok=True)
-    confusion_path = outputs_dir / f"confusion_matrix_{args.subset}.csv"
+    confusion_path = output_dir / f"confusion_matrix_{args.subset}.csv"
     write_confusion_csv(confusion_path, labels, matrix)
-    distribution_path = outputs_dir / f"prediction_distribution_{args.subset}.json"
+    distribution_path = output_dir / f"prediction_distribution_{args.subset}.json"
     distribution_payload = {
         "subset": args.subset,
         "limit": args.limit,
@@ -135,19 +197,27 @@ def main() -> None:
     }
     with distribution_path.open("w", encoding="utf-8") as file:
         json.dump(distribution_payload, file, indent=2)
+    silence_analysis = build_silence_error_analysis(labels, matrix, args.subset, args.limit)
+    silence_analysis_path = output_dir / f"silence_error_analysis_{args.subset}.json"
+    with silence_analysis_path.open("w", encoding="utf-8") as file:
+        json.dump(silence_analysis, file, indent=2)
+    legacy_silence_analysis_path = Path("outputs") / f"silence_error_analysis_{args.subset}.json"
+    legacy_silence_analysis_path.parent.mkdir(parents=True, exist_ok=True)
+    if legacy_silence_analysis_path.resolve() != silence_analysis_path.resolve():
+        with legacy_silence_analysis_path.open("w", encoding="utf-8") as file:
+            json.dump(silence_analysis, file, indent=2)
 
-    metrics_path = outputs_dir / "metrics.json"
-    if metrics_path.exists():
-        with metrics_path.open("r", encoding="utf-8") as file:
-            metrics = json.load(file)
-    else:
-        metrics = {}
+    metrics_path = output_dir / "metrics.json"
+    metrics = {}
+    metrics["output_dir"] = str(output_dir)
     metrics["macro_accuracy"] = macro_accuracy
     metrics["target_keyword_macro_accuracy"] = target_keyword_macro_accuracy
     metrics["non_unknown_macro_accuracy"] = non_unknown_macro_accuracy
     metrics["prediction_distribution"] = prediction_counts
     metrics["ground_truth_distribution"] = ground_truth_counts
     metrics["prediction_distribution_json"] = str(distribution_path)
+    metrics["silence_error_analysis_json"] = str(silence_analysis_path)
+    metrics["silence_error_analysis_legacy_json"] = str(legacy_silence_analysis_path)
     if args.subset == "testing":
         metrics["test_accuracy"] = eval_accuracy
         metrics["per_class_accuracy"] = per_class_accuracy
@@ -161,6 +231,7 @@ def main() -> None:
         metrics["testing_prediction_distribution"] = prediction_counts
         metrics["testing_ground_truth_distribution"] = ground_truth_counts
         metrics["testing_prediction_distribution_json"] = str(distribution_path)
+        metrics["testing_silence_error_analysis_json"] = str(silence_analysis_path)
     else:
         metrics["validation_accuracy"] = eval_accuracy
         metrics["validation_per_class_accuracy"] = per_class_accuracy
@@ -171,6 +242,7 @@ def main() -> None:
         metrics["validation_prediction_distribution"] = prediction_counts
         metrics["validation_ground_truth_distribution"] = ground_truth_counts
         metrics["validation_prediction_distribution_json"] = str(distribution_path)
+        metrics["validation_silence_error_analysis_json"] = str(silence_analysis_path)
     metrics["num_parameters"] = num_parameters
     with metrics_path.open("w", encoding="utf-8") as file:
         json.dump(metrics, file, indent=2)
@@ -186,6 +258,14 @@ def main() -> None:
         f"{'null' if non_unknown_macro_accuracy is None else f'{non_unknown_macro_accuracy:.4f}'}"
     )
     print(f"num_parameters={num_parameters}")
+    print(f"ground_truth_distribution: {ground_truth_counts}")
+    print(f"prediction_distribution: {prediction_counts}")
+    print(f"{args.subset}_silence_ground_truth_count={silence_analysis['silence_ground_truth_count']}")
+    print(f"{args.subset}_silence_top3_predictions={silence_analysis['silence_top3_predictions']}")
+    print(
+        f"{args.subset}_silence_mainly_predicted_as_unknown="
+        f"{silence_analysis['silence_mainly_predicted_as_unknown']}"
+    )
     print("per_class_accuracy:")
     for label in labels:
         value = per_class_accuracy[label]
@@ -193,6 +273,7 @@ def main() -> None:
         print(f"  {label}: {text}")
     print(f"saved confusion matrix: {confusion_path}")
     print(f"saved prediction distribution: {distribution_path}")
+    print(f"saved silence error analysis: {silence_analysis_path}")
     print(f"updated metrics: {metrics_path}")
 
 

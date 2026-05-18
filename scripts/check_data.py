@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", default=None, help="Override dataset root directory.")
     parser.add_argument("--limit", type=int, default=1000, help="Maximum real examples per split.")
     parser.add_argument("--batch-size", type=int, default=None, help="Override inspection batch size.")
+    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers for batch shape check.")
     parser.add_argument("--no-download", action="store_true", help="Disable torchaudio dataset download.")
     return parser.parse_args()
 
@@ -52,6 +53,8 @@ def make_dataset(
         limit=limit,
         download=download,
         silence_ratio=float(data_cfg.get("silence_ratio", 0.05)),
+        silence_gain_min=float(data_cfg.get("silence_gain_min", 0.0)),
+        silence_gain_max=float(data_cfg.get("silence_gain_max", 0.001)),
         seed=seed,
     )
 
@@ -95,13 +98,14 @@ def main() -> None:
             "class_distribution": counts,
             "limit_class_counts": counts,
             "missing_labels": missing_labels,
+            "silence_strategy": dataset.silence_strategy(),
         }
 
     train_loader = DataLoader(
         datasets["training"],
         batch_size=batch_size,
         shuffle=False,
-        num_workers=int(train_cfg.get("num_workers", 0)),
+        num_workers=args.num_workers,
     )
     waveforms, targets = next(iter(train_loader))
     extractor = LogMelExtractor(**feature_cfg)
@@ -116,6 +120,7 @@ def main() -> None:
         "sample_rate": int(data_cfg.get("sample_rate", 16_000)),
         "fixed_waveform_length": int(data_cfg.get("num_samples", 16_000)),
         "label_mapping": label_mapping,
+        "silence_strategy": datasets["training"].silence_strategy(),
         "splits": split_summaries,
         "warnings": warnings,
         "batch": {

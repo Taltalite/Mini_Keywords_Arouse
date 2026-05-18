@@ -23,10 +23,19 @@ class LogMelExtractor(nn.Module):
         n_mels: int = 40,
         f_min: float = 20.0,
         f_max: float = 7_600.0,
-        normalize: bool = True,
+        normalize: bool | None = None,
+        feature_norm: str | None = None,
+        feature_global_mean: float = 0.0,
+        feature_global_std: float = 1.0,
     ) -> None:
         super().__init__()
-        self.normalize = normalize
+        if feature_norm is None:
+            feature_norm = "per_sample" if normalize else "none"
+        if feature_norm not in {"none", "global", "per_sample"}:
+            raise ValueError(f"Unsupported feature_norm: {feature_norm}")
+        self.feature_norm = feature_norm
+        self.feature_global_mean = float(feature_global_mean)
+        self.feature_global_std = max(float(feature_global_std), 1e-5)
         self.mel = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate,
             n_fft=n_fft,
@@ -46,8 +55,10 @@ class LogMelExtractor(nn.Module):
             raise ValueError(f"Expected waveform shape [B, 1, T] or [B, T], got {waveform.shape}")
 
         features = torch.log(self.mel(waveform).clamp_min(1e-6))
-        if self.normalize:
+        if self.feature_norm == "per_sample":
             mean = features.mean(dim=(-2, -1), keepdim=True)
             std = features.std(dim=(-2, -1), keepdim=True).clamp_min(1e-5)
             features = (features - mean) / std
+        elif self.feature_norm == "global":
+            features = (features - self.feature_global_mean) / self.feature_global_std
         return features

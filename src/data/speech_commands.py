@@ -80,6 +80,8 @@ class SpeechCommandsKWS(Dataset):
         limit: int | None = None,
         download: bool = True,
         silence_ratio: float = 0.05,
+        silence_gain_min: float = 0.0,
+        silence_gain_max: float = 0.001,
         seed: int = 1337,
     ) -> None:
         if subset not in {"training", "validation", "testing"}:
@@ -92,6 +94,10 @@ class SpeechCommandsKWS(Dataset):
         self.num_samples = num_samples
         self.training = subset == "training"
         self.rng = random.Random(seed)
+        self.silence_gain_min = silence_gain_min
+        self.silence_gain_max = silence_gain_max
+        if self.silence_gain_min < 0 or self.silence_gain_max < self.silence_gain_min:
+            raise ValueError("silence_gain_min/max must satisfy 0 <= min <= max")
 
         self.dataset = torchaudio.datasets.SPEECHCOMMANDS(
             root=str(self.data_root),
@@ -110,6 +116,8 @@ class SpeechCommandsKWS(Dataset):
 
         silence_count = max(1, int(len(self.indices) * silence_ratio)) if self.indices else 0
         self.silence_items = list(range(silence_count))
+        self.background_noise_paths = self._find_background_noise_paths()
+        self._background_cache: dict[Path, tuple[int, torch.Tensor]] = {}
 
     @property
     def labels(self) -> tuple[str, ...]:
@@ -131,6 +139,16 @@ class SpeechCommandsKWS(Dataset):
         for target in self.target_indices():
             counts[ALL_LABELS[target]] += 1
         return counts
+
+    def silence_strategy(self) -> dict[str, object]:
+        return {
+            "source": "background_noise" if self.background_noise_paths else "synthetic",
+            "background_noise_files": [str(path) for path in self.background_noise_paths],
+            "fallback": "50% zeros, 50% low-amplitude random noise",
+            "gain_min": self.silence_gain_min,
+            "gain_max": self.silence_gain_max,
+            "count": len(self.silence_items),
+        }
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
         if idx < 0 or idx >= len(self):
@@ -181,10 +199,42 @@ class SpeechCommandsKWS(Dataset):
         raise FileNotFoundError(f"Could not resolve Speech Commands audio path: {audio_path}")
 
     def _make_silence(self) -> torch.Tensor:
-        if self.training and self.rng.random() < 0.5:
-            noise = torch.randn(1, self.num_samples) * 0.001
+        if self.background_noise_paths:
+            return self._make_background_silence()
+        if self.rng.random() < 0.5:
+            noise = torch.randn(1, self.num_samples) * self._sample_silence_gain()
             return noise.float()
         return torch.zeros(1, self.num_samples, dtype=torch.float32)
+
+    def _sample_silence_gain(self) -> float:
+        return self.rng.uniform(self.silence_gain_min, self.silence_gain_max)
+
+    def _make_background_silence(self) -> torch.Tensor:
+        path = self.rng.choice(self.background_noise_paths)
+        source_sr, waveform = self._load_background_noise(path)
+        waveform = _to_mono(waveform).float()
+        if source_sr != self.sample_rate:
+            waveform = torchaudio.functional.resample(waveform, source_sr, self.sample_rate)
+        waveform = _fix_length(waveform, self.num_samples, training=True, rng=self.rng)
+        return (waveform * self._sample_silence_gain()).float()
+
+    def _load_background_noise(self, path: Path) -> tuple[int, torch.Tensor]:
+        if path not in self._background_cache:
+            source_sr, audio = wavfile.read(path)
+            self._background_cache[path] = (int(source_sr), self._wav_to_tensor(audio))
+        return self._background_cache[path]
+
+    def _find_background_noise_paths(self) -> list[Path]:
+        candidates = (
+            self.data_root / "SpeechCommands" / "speech_commands_v0.02" / "_background_noise_",
+            self.data_root / "SpeechCommands" / "SpeechCommands" / "speech_commands_v0.02" / "_background_noise_",
+            self.data_root / "speech_commands_v0.02" / "_background_noise_",
+        )
+        paths: list[Path] = []
+        for directory in candidates:
+            if directory.exists():
+                paths.extend(sorted(directory.glob("*.wav")))
+        return paths
 
     @staticmethod
     def _wav_to_tensor(audio: np.ndarray) -> torch.Tensor:

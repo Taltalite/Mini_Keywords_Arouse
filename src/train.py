@@ -27,8 +27,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=None, help="Override DataLoader workers.")
     parser.add_argument(
         "--output",
-        default="outputs/train_run",
-        help="Training output directory. It must be absent or empty.",
+        default=None,
+        help="Optional training output directory. It must be absent or empty when provided.",
     )
     parser.add_argument("--no-download", action="store_true", help="Disable torchaudio dataset download.")
     return parser.parse_args()
@@ -124,15 +124,16 @@ def main() -> None:
     if args.num_workers is not None:
         train_cfg["num_workers"] = args.num_workers
     epochs = int(args.epochs if args.epochs is not None else train_cfg.get("epochs", 1))
-    output_dir = Path(args.output)
-    if output_dir.exists() and not output_dir.is_dir():
-        print(f"error: --output must be a directory path, got existing file: {output_dir}")
-        sys.exit(-1)
-    if output_dir.exists() and any(output_dir.iterdir()):
-        print(
-            f"warning: output directory is not empty and files may be overwritten: {output_dir}"
-        )
-        sys.exit(-1)
+    output_dir = Path(args.output) if args.output is not None else Path("outputs")
+    if args.output is not None:
+        if output_dir.exists() and not output_dir.is_dir():
+            print(f"error: --output must be a directory path, got existing file: {output_dir}")
+            sys.exit(-1)
+        if output_dir.exists() and any(output_dir.iterdir()):
+            print(
+                f"warning: output directory is not empty and files may be overwritten: {output_dir}"
+            )
+            sys.exit(-1)
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_dir / "best.pt"
     metrics_path = output_dir / "metrics.json"
@@ -152,6 +153,8 @@ def main() -> None:
         limit=args.limit,
         download=not args.no_download,
         silence_ratio=float(data_cfg.get("silence_ratio", 0.05)),
+        silence_gain_min=float(data_cfg.get("silence_gain_min", 0.0)),
+        silence_gain_max=float(data_cfg.get("silence_gain_max", 0.001)),
         seed=seed,
     )
     val_dataset = SpeechCommandsKWS(
@@ -162,6 +165,8 @@ def main() -> None:
         limit=args.limit,
         download=not args.no_download,
         silence_ratio=float(data_cfg.get("silence_ratio", 0.05)),
+        silence_gain_min=float(data_cfg.get("silence_gain_min", 0.0)),
+        silence_gain_max=float(data_cfg.get("silence_gain_max", 0.001)),
         seed=seed + 1,
     )
 

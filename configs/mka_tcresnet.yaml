@@ -4,7 +4,9 @@ data:
   data_root: data/SpeechCommands
   sample_rate: 16000
   num_samples: 16000
-  silence_ratio: 0.05
+  silence_ratio: 0.1
+  silence_gain_min: 0.0
+  silence_gain_max: 0.05
 
 features:
   sample_rate: 16000
@@ -14,7 +16,7 @@ features:
   n_mels: 40
   f_min: 20
   f_max: 7600
-  normalize: true
+  feature_norm: per_sample
 
 model:
   name: tc_resnet
