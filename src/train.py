@@ -24,6 +24,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=None, help="Number of training epochs.")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size.")
     parser.add_argument("--num-workers", type=int, default=None, help="Override DataLoader workers.")
+    parser.add_argument(
+        "--output",
+        default="outputs/best.pt",
+        help="Checkpoint output path. Existing files are overwritten after a warning.",
+    )
     parser.add_argument("--no-download", action="store_true", help="Disable torchaudio dataset download.")
     return parser.parse_args()
 
@@ -118,6 +123,12 @@ def main() -> None:
     if args.num_workers is not None:
         train_cfg["num_workers"] = args.num_workers
     epochs = int(args.epochs if args.epochs is not None else train_cfg.get("epochs", 1))
+    checkpoint_path = Path(args.output)
+    if checkpoint_path.exists():
+        print(f"warning: checkpoint output already exists and will be overwritten: {checkpoint_path}")
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    if not checkpoint_path.parent.is_dir():
+        raise RuntimeError(f"Checkpoint output parent is not a directory: {checkpoint_path.parent}")
 
     device = torch.device(str(train_cfg.get("device", "cpu")))
     if device.type == "cuda" and not torch.cuda.is_available():
@@ -209,6 +220,7 @@ def main() -> None:
         "model_name": model_cfg["name"],
         "epochs": epochs,
         "limit": args.limit,
+        "checkpoint_path": str(checkpoint_path),
         "sampler": {
             "type": sampler_type,
             "use_weighted_sampler": use_weighted_sampler,
@@ -270,11 +282,11 @@ def main() -> None:
                 "metrics": metrics,
                 "config": config,
             }
-            torch.save(checkpoint, outputs_dir / "best.pt")
+            torch.save(checkpoint, checkpoint_path)
 
     with (outputs_dir / "metrics.json").open("w", encoding="utf-8") as file:
         json.dump(metrics, file, indent=2)
-    print(f"saved checkpoint: {outputs_dir / 'best.pt'}")
+    print(f"saved checkpoint: {checkpoint_path}")
     print(f"saved metrics: {outputs_dir / 'metrics.json'}")
 
 
