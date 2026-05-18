@@ -12,7 +12,7 @@ stage focuses on a minimal CPU-runnable PyTorch pipeline:
 - save reproducible metrics under `outputs/`
 
 ONNX export, quantization, latency benchmark, and streaming inference are planned
-for the next phase after smoke tests pass.
+for the next phase after the PyTorch training and validation loop is stable.
 
 ## Environment
 
@@ -34,6 +34,26 @@ pip install -r requirements.txt
 
 CPU execution is the default. CUDA is not required.
 
+Recent `torchaudio` builds may route WAV decoding through `torchcodec`, which
+requires FFmpeg shared libraries. The dataset wrapper first uses the public
+`SPEECHCOMMANDS.__getitem__` interface and falls back to public
+`SPEECHCOMMANDS.get_metadata()` plus `scipy.io.wavfile` if the local WSL2
+environment lacks FFmpeg.
+
+## Training Pipeline
+
+Minimal closed-loop CPU pipeline:
+
+```bash
+python scripts/check_data.py --limit 200
+python -m src.train --config configs/mka_smallcnn.yaml --limit 200 --epochs 1
+python -m src.eval --ckpt outputs/best.pt --subset validation --limit 100
+```
+
+This checks data loading and feature shape, trains `SmallCNN`, saves
+`outputs/best.pt`, writes `outputs/metrics.json`, and produces
+`outputs/confusion_matrix_validation.csv`.
+
 ## First-Stage Smoke Tests
 
 Check dataset loading and feature shape:
@@ -45,10 +65,16 @@ python scripts/check_data.py --limit 200
 Train one small CPU epoch:
 
 ```bash
-python -m src.train --config configs/kws_smallcnn.yaml --limit 200 --epochs 1
+python -m src.train --config configs/mka_smallcnn.yaml --limit 200 --epochs 1
 ```
 
-Evaluate the saved checkpoint:
+Validate the saved checkpoint on the Speech Commands validation subset:
+
+```bash
+python -m src.eval --ckpt outputs/best.pt --subset validation --limit 100
+```
+
+Evaluate the saved checkpoint on the Speech Commands testing subset:
 
 ```bash
 python -m src.eval --ckpt outputs/best.pt --limit 100
@@ -59,7 +85,14 @@ Expected generated files:
 ```text
 outputs/best.pt
 outputs/metrics.json
+outputs/confusion_matrix_validation.csv
 outputs/confusion_matrix.csv
+```
+
+The same closed-loop smoke flow is available as:
+
+```bash
+bash scripts/train_smoke.sh
 ```
 
 ## Dataset
@@ -92,9 +125,11 @@ Mini_Keywords_Arouse/
 ├── README.md
 ├── requirements.txt
 ├── configs/
-│   └── kws_smallcnn.yaml
+│   └── mka_smallcnn.yaml
 ├── scripts/
-│   └── check_data.py
+│   ├── check_data.py
+│   ├── train_smoke.sh
+│   └── train_full.sh
 ├── src/
 │   ├── data/
 │   │   └── speech_commands.py

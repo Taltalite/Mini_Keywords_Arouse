@@ -17,8 +17,14 @@ from src.models.small_cnn import SmallCNN
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a trained SmallCNN KWS checkpoint.")
     parser.add_argument("--ckpt", required=True, help="Checkpoint path, e.g. outputs/best.pt.")
+    parser.add_argument(
+        "--subset",
+        default="testing",
+        choices=["validation", "testing"],
+        help="Speech Commands subset to evaluate.",
+    )
     parser.add_argument("--data-root", default=None, help="Override dataset root.")
-    parser.add_argument("--limit", type=int, default=None, help="Limit real test examples.")
+    parser.add_argument("--limit", type=int, default=None, help="Limit real evaluation examples.")
     parser.add_argument("--batch-size", type=int, default=32, help="Evaluation batch size.")
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers.")
     parser.add_argument("--no-download", action="store_true", help="Disable torchaudio dataset download.")
@@ -51,17 +57,17 @@ def main() -> None:
     if args.data_root is not None:
         data_cfg["data_root"] = args.data_root
 
-    test_dataset = SpeechCommandsKWS(
+    eval_dataset = SpeechCommandsKWS(
         data_root=data_cfg.get("data_root", "data/SpeechCommands"),
-        subset="testing",
+        subset=args.subset,
         sample_rate=int(data_cfg.get("sample_rate", 16_000)),
         num_samples=int(data_cfg.get("num_samples", 16_000)),
         limit=args.limit,
         download=not args.no_download,
         silence_ratio=float(data_cfg.get("silence_ratio", 0.05)),
     )
-    test_loader = DataLoader(
-        test_dataset,
+    eval_loader = DataLoader(
+        eval_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
@@ -83,7 +89,7 @@ def main() -> None:
     total = 0
 
     with torch.no_grad():
-        for waveforms, targets in test_loader:
+        for waveforms, targets in eval_loader:
             waveforms = waveforms.to(device)
             targets = targets.to(device)
             logits = model(feature_extractor(waveforms))
@@ -93,7 +99,7 @@ def main() -> None:
             for true_idx, pred_idx in zip(targets.tolist(), preds.tolist()):
                 matrix[int(true_idx)][int(pred_idx)] += 1
 
-    test_accuracy = correct / total if total else 0.0
+    eval_accuracy = correct / total if total else 0.0
     per_class_accuracy: dict[str, float | None] = {}
     for idx, label in enumerate(labels):
         row_total = sum(matrix[idx])
@@ -101,7 +107,11 @@ def main() -> None:
 
     outputs_dir = Path("outputs")
     outputs_dir.mkdir(parents=True, exist_ok=True)
-    confusion_path = outputs_dir / "confusion_matrix.csv"
+    confusion_path = (
+        outputs_dir / "confusion_matrix.csv"
+        if args.subset == "testing"
+        else outputs_dir / f"confusion_matrix_{args.subset}.csv"
+    )
     write_confusion_csv(confusion_path, labels, matrix)
 
     metrics_path = outputs_dir / "metrics.json"
@@ -110,13 +120,18 @@ def main() -> None:
             metrics = json.load(file)
     else:
         metrics = {}
-    metrics["test_accuracy"] = test_accuracy
-    metrics["per_class_accuracy"] = per_class_accuracy
-    metrics["confusion_matrix_csv"] = str(confusion_path)
+    if args.subset == "testing":
+        metrics["test_accuracy"] = eval_accuracy
+        metrics["per_class_accuracy"] = per_class_accuracy
+        metrics["confusion_matrix_csv"] = str(confusion_path)
+    else:
+        metrics["validation_accuracy"] = eval_accuracy
+        metrics["validation_per_class_accuracy"] = per_class_accuracy
+        metrics["validation_confusion_matrix_csv"] = str(confusion_path)
     with metrics_path.open("w", encoding="utf-8") as file:
         json.dump(metrics, file, indent=2)
 
-    print(f"test_accuracy={test_accuracy:.4f}")
+    print(f"{args.subset}_accuracy={eval_accuracy:.4f}")
     print("per_class_accuracy:")
     for label in labels:
         value = per_class_accuracy[label]

@@ -1,0 +1,29 @@
+seed: 1337
+
+data:
+  data_root: data/SpeechCommands
+  sample_rate: 16000
+  num_samples: 16000
+  silence_ratio: 0.05
+
+features:
+  sample_rate: 16000
+  n_fft: 400
+  hop_length: 160
+  win_length: 400
+  n_mels: 40
+  f_min: 20
+  f_max: 7600
+  normalize: true
+
+model:
+  name: small_cnn
+  num_classes: 12
+  dropout: 0.1
+
+train:
+  batch_size: 32
+  num_workers: 0
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  device: cpu

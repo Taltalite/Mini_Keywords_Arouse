@@ -21,7 +21,7 @@ env/
 !.env.example
 
 # Dataset downloads and extracted data
-data/
+/data/
 *.tar
 *.tar.gz
 *.tgz
