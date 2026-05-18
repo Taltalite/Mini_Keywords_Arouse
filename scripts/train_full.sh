@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-python -m src.train --config configs/mka_smallcnn.yaml --limit 2000 --epochs 2
-python -m src.eval --ckpt outputs/best.pt --subset validation --limit 1000
+RUN_DIR="outputs/train_full_$(date +%Y%m%d_%H%M%S)"
+
+python -m src.train --config configs/mka_smallcnn.yaml --limit 2000 --epochs 2 --output "$RUN_DIR"
+python -m src.eval --ckpt "$RUN_DIR/best.pt" --subset validation --limit 1000

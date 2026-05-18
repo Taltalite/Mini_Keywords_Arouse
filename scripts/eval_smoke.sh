@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ ! -f outputs/best.pt ]]; then
-  python -m src.train --config configs/mka_smallcnn.yaml --limit 200 --epochs 1
+RUN_DIR="${RUN_DIR:-outputs/eval_smoke}"
+
+if [[ ! -f "$RUN_DIR/best.pt" ]]; then
+  python -m src.train --config configs/mka_smallcnn.yaml --limit 200 --epochs 1 --output "$RUN_DIR"
 fi
 
-python -m src.eval --ckpt outputs/best.pt --subset validation --limit 100
-python -m src.eval --ckpt outputs/best.pt --subset testing --limit 100
+python -m src.eval --ckpt "$RUN_DIR/best.pt" --subset validation --limit 100
+python -m src.eval --ckpt "$RUN_DIR/best.pt" --subset testing --limit 100

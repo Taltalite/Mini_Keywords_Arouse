@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -26,8 +27,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=None, help="Override DataLoader workers.")
     parser.add_argument(
         "--output",
-        default="outputs/best.pt",
-        help="Checkpoint output path. Existing files are overwritten after a warning.",
+        default="outputs/train_run",
+        help="Training output directory. It must be absent or empty.",
     )
     parser.add_argument("--no-download", action="store_true", help="Disable torchaudio dataset download.")
     return parser.parse_args()
@@ -123,12 +124,18 @@ def main() -> None:
     if args.num_workers is not None:
         train_cfg["num_workers"] = args.num_workers
     epochs = int(args.epochs if args.epochs is not None else train_cfg.get("epochs", 1))
-    checkpoint_path = Path(args.output)
-    if checkpoint_path.exists():
-        print(f"warning: checkpoint output already exists and will be overwritten: {checkpoint_path}")
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    if not checkpoint_path.parent.is_dir():
-        raise RuntimeError(f"Checkpoint output parent is not a directory: {checkpoint_path.parent}")
+    output_dir = Path(args.output)
+    if output_dir.exists() and not output_dir.is_dir():
+        print(f"error: --output must be a directory path, got existing file: {output_dir}")
+        sys.exit(-1)
+    if output_dir.exists() and any(output_dir.iterdir()):
+        print(
+            f"warning: output directory is not empty and files may be overwritten: {output_dir}"
+        )
+        sys.exit(-1)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = output_dir / "best.pt"
+    metrics_path = output_dir / "metrics.json"
 
     device = torch.device(str(train_cfg.get("device", "cpu")))
     if device.type == "cuda" and not torch.cuda.is_available():
@@ -209,9 +216,6 @@ def main() -> None:
         weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
     )
 
-    outputs_dir = Path("outputs")
-    outputs_dir.mkdir(parents=True, exist_ok=True)
-
     metrics: dict[str, Any] = {
         "train_loss": [],
         "val_accuracy": [],
@@ -220,7 +224,9 @@ def main() -> None:
         "model_name": model_cfg["name"],
         "epochs": epochs,
         "limit": args.limit,
+        "output_dir": str(output_dir),
         "checkpoint_path": str(checkpoint_path),
+        "metrics_path": str(metrics_path),
         "sampler": {
             "type": sampler_type,
             "use_weighted_sampler": use_weighted_sampler,
@@ -284,10 +290,10 @@ def main() -> None:
             }
             torch.save(checkpoint, checkpoint_path)
 
-    with (outputs_dir / "metrics.json").open("w", encoding="utf-8") as file:
+    with metrics_path.open("w", encoding="utf-8") as file:
         json.dump(metrics, file, indent=2)
     print(f"saved checkpoint: {checkpoint_path}")
-    print(f"saved metrics: {outputs_dir / 'metrics.json'}")
+    print(f"saved metrics: {metrics_path}")
 
 
 if __name__ == "__main__":
