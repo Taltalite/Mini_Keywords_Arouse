@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 
 from src.data.speech_commands import ALL_LABELS, SpeechCommandsKWS
 from src.features.logmel import LogMelExtractor
-from src.models.small_cnn import SmallCNN
+from src.models.small_cnn import SmallCNN, count_parameters
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,6 +82,7 @@ def main() -> None:
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
+    num_parameters = count_parameters(model)
 
     num_classes = len(labels)
     matrix = [[0 for _ in range(num_classes)] for _ in range(num_classes)]
@@ -107,11 +108,7 @@ def main() -> None:
 
     outputs_dir = Path("outputs")
     outputs_dir.mkdir(parents=True, exist_ok=True)
-    confusion_path = (
-        outputs_dir / "confusion_matrix.csv"
-        if args.subset == "testing"
-        else outputs_dir / f"confusion_matrix_{args.subset}.csv"
-    )
+    confusion_path = outputs_dir / f"confusion_matrix_{args.subset}.csv"
     write_confusion_csv(confusion_path, labels, matrix)
 
     metrics_path = outputs_dir / "metrics.json"
@@ -124,14 +121,19 @@ def main() -> None:
         metrics["test_accuracy"] = eval_accuracy
         metrics["per_class_accuracy"] = per_class_accuracy
         metrics["confusion_matrix_csv"] = str(confusion_path)
+        metrics["testing_accuracy"] = eval_accuracy
+        metrics["testing_per_class_accuracy"] = per_class_accuracy
+        metrics["testing_confusion_matrix_csv"] = str(confusion_path)
     else:
         metrics["validation_accuracy"] = eval_accuracy
         metrics["validation_per_class_accuracy"] = per_class_accuracy
         metrics["validation_confusion_matrix_csv"] = str(confusion_path)
+    metrics["num_parameters"] = num_parameters
     with metrics_path.open("w", encoding="utf-8") as file:
         json.dump(metrics, file, indent=2)
 
     print(f"{args.subset}_accuracy={eval_accuracy:.4f}")
+    print(f"num_parameters={num_parameters}")
     print("per_class_accuracy:")
     for label in labels:
         value = per_class_accuracy[label]
