@@ -26,10 +26,10 @@ model:
   dropout: 0.1
 
 train:
-  batch_size: 32
-  num_workers: 0
-  learning_rate: 0.001
+  batch_size: 512
+  num_workers: 8
+  learning_rate: 0.0005
   weight_decay: 0.0001
-  device: cpu
+  device: cuda:0
   use_weighted_sampler: true
   use_class_weighted_loss: false

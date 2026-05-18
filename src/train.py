@@ -150,14 +150,14 @@ def main() -> None:
         shuffle=sampler is None,
         sampler=sampler,
         num_workers=num_workers,
-        pin_memory=False,
+        pin_memory=device.type == "cuda",
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=False,
+        pin_memory=device.type == "cuda",
     )
 
     feature_extractor = LogMelExtractor(**feature_cfg).to(device)
