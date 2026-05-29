@@ -9,24 +9,18 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 import torch
-import yaml
 
 from src.features.logmel import LogMelExtractor
 from src.models import build_model, count_parameters, normalize_model_config
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export SmallCNN KWS checkpoint to ONNX.")
+    parser = argparse.ArgumentParser(description="Export PyTorch KWS checkpoint to ONNX.")
     parser.add_argument("--ckpt", required=True, help="Checkpoint path, e.g. outputs/best.pt.")
-    parser.add_argument("--config", required=True, help="Path to YAML config.")
+    parser.add_argument("--config", default=None, help="Optional YAML config override.")
     parser.add_argument("--out", required=True, help="Output ONNX path, e.g. outputs/model.onnx.")
     parser.add_argument("--opset", type=int, default=17, help="ONNX opset version.")
     return parser.parse_args()
-
-
-def load_config(path: str | Path) -> dict[str, Any]:
-    with Path(path).open("r", encoding="utf-8") as file:
-        return yaml.safe_load(file) or {}
 
 
 def load_checkpoint(path: str | Path) -> dict[str, Any]:
@@ -36,10 +30,7 @@ def load_checkpoint(path: str | Path) -> dict[str, Any]:
         return torch.load(path, map_location="cpu")
 
 
-def infer_feature_input(
-    feature_cfg: dict[str, Any],
-    data_cfg: dict[str, Any],
-) -> torch.Tensor:
+def infer_feature_shape(feature_cfg: dict[str, Any], data_cfg: dict[str, Any]) -> torch.Tensor:
     num_samples = int(data_cfg.get("num_samples", 16_000))
     extractor = LogMelExtractor(**feature_cfg).eval()
     dummy_waveform = torch.zeros(1, 1, num_samples, dtype=torch.float32)
@@ -94,14 +85,20 @@ def run_onnx_validation(
 def main() -> None:
     args = parse_args()
     checkpoint = load_checkpoint(args.ckpt)
-    config = load_config(args.config)
 
-    feature_cfg = dict(config.get("features", {}))
-    feature_cfg.update(dict(checkpoint.get("feature_config", {})))
-    data_cfg = dict(config.get("data", {}))
-    data_cfg.update(dict(checkpoint.get("data_config", {})))
-    model_cfg = dict(config.get("model", {}))
-    model_cfg.update(dict(checkpoint.get("model_config", {})))
+    feature_cfg = dict(checkpoint.get("feature_config", {}))
+    data_cfg = dict(checkpoint.get("data_config", {}))
+    model_cfg = dict(checkpoint.get("model_config", {}))
+
+    if args.config is not None:
+        import yaml
+
+        with Path(args.config).open("r", encoding="utf-8") as f:
+            external = yaml.safe_load(f) or {}
+        feature_cfg.update(dict(external.get("features", {})))
+        data_cfg.update(dict(external.get("data", {})))
+        model_cfg.update(dict(external.get("model", {})))
+
     model_cfg.setdefault("name", "small_cnn")
     model_cfg = normalize_model_config(model_cfg, feature_cfg)
 
@@ -109,7 +106,7 @@ def main() -> None:
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    dummy_features = infer_feature_input(feature_cfg, data_cfg)
+    dummy_features = infer_feature_shape(feature_cfg, data_cfg)
     output_path = Path(args.out)
     export_onnx(model, dummy_features, output_path, args.opset)
 
@@ -119,7 +116,6 @@ def main() -> None:
 
     check = {
         "ckpt": str(Path(args.ckpt)),
-        "config": str(Path(args.config)),
         "onnx_path": str(output_path),
         "opset": args.opset,
         "feature_input_shape": list(dummy_features.shape),
@@ -131,8 +127,8 @@ def main() -> None:
     }
 
     check_path = output_path.parent / "onnx_check.json"
-    with check_path.open("w", encoding="utf-8") as file:
-        json.dump(check, file, indent=2)
+    with check_path.open("w", encoding="utf-8") as f:
+        json.dump(check, f, indent=2)
 
     print(f"exported onnx: {output_path}")
     print(f"feature_input_shape: {tuple(dummy_features.shape)}")
