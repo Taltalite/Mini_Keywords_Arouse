@@ -28,7 +28,8 @@ def main() -> None:
     quantize_dynamic(
         model_input=str(input_path),
         model_output=str(output_path),
-        weight_type=QuantType.QInt8,
+        weight_type=QuantType.QUInt8,
+        op_types_to_quantize=["MatMul", "Gemm", "Conv"],
     )
 
     input_size = input_path.stat().st_size
