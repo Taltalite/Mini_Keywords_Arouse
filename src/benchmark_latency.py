@@ -11,17 +11,24 @@ import onnxruntime as ort
 import torch
 
 from src.features.logmel import LogMelExtractor
-from src.models import build_model, normalize_model_config
+from src.models import build_model, count_parameters, normalize_model_config
+
+
+WARMUP = 50
+REPEAT = 500
+INPUT_SHAPE = (1, 1, 40, 101)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark CPU inference latency for KWS models.")
+    parser = argparse.ArgumentParser(description="Benchmark KWS inference latency on CPU.")
     parser.add_argument("--ckpt", required=True, help="PyTorch checkpoint path.")
     parser.add_argument("--onnx", required=True, help="ONNX FP32 model path.")
     parser.add_argument("--onnx-int8", required=True, help="ONNX INT8 model path.")
     parser.add_argument("--output", default="outputs/latency.json", help="Output JSON path.")
-    parser.add_argument("--warmup", type=int, default=50, help="Warmup iterations.")
-    parser.add_argument("--repeat", type=int, default=500, help="Benchmark iterations.")
+
+    parser.add_argument("--warmup", type=int, default=WARMUP, help="Warmup iterations.")
+    parser.add_argument("--repeat", type=int, default=REPEAT, help="Benchmark iterations.")
+
     return parser.parse_args()
 
 
@@ -31,101 +38,102 @@ def load_checkpoint(path: str | Path) -> dict[str, Any]:
     except TypeError:
         return torch.load(path, map_location="cpu")
 
-
-def benchmark_pytorch(model: torch.nn.Module, dummy_input: torch.Tensor, warmup: int, repeat: int) -> list[float]:
+def build_pytorch_model(checkpoint: dict[str, Any]) -> tuple[torch.nn.Module, torch.Tensor]:
+    feature_cfg = dict(checkpoint.get("feature_config", {}))
+    model_cfg = normalize_model_config(dict(checkpoint.get("model_config", {})), feature_cfg)
+    model = build_model(model_cfg, feature_cfg)
+    model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
+    dummy = torch.randn(INPUT_SHAPE, dtype=torch.float32)
+    return model, dummy
+
+
+def benchmark_pytorch(model: torch.nn.Module, dummy: torch.Tensor, warmup: int, repeat: int) -> list[float]:
     with torch.no_grad():
         for _ in range(warmup):
-            _ = model(dummy_input)
+            _ = model(dummy)
 
-    times: list[float] = []
-    with torch.no_grad():
+        times: list[float] = []
         for _ in range(repeat):
             start = time.perf_counter()
-            _ = model(dummy_input)
+            _ = model(dummy)
             end = time.perf_counter()
             times.append((end - start) * 1000.0)
     return times
 
 
-def benchmark_onnx(session: ort.InferenceSession, dummy_input: np.ndarray, warmup: int, repeat: int) -> list[float]:
+def benchmark_onnx(onnx_path: Path, warmup: int, repeat: int) -> list[float]:
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
-    for _ in range(warmup):
-        _ = session.run(None, {input_name: dummy_input})
+    dummy = np.random.randn(*INPUT_SHAPE).astype(np.float32)
 
+    for _ in range(warmup):
+        _ = session.run(None, {input_name: dummy})
     times: list[float] = []
     for _ in range(repeat):
         start = time.perf_counter()
-        _ = session.run(None, {input_name: dummy_input})
+        _ = session.run(None, {input_name: dummy})
         end = time.perf_counter()
         times.append((end - start) * 1000.0)
     return times
 
 
-def compute_metrics(times: list[float]) -> dict[str, float]:
-    arr = np.array(times)
-    return {
-        "mean_ms": float(np.mean(arr)),
+
+def summarize(times: list[float], model_path: Path | None = None) -> dict[str, Any]:
+    arr = np.asarray(times, dtype=np.float64)
+    result: dict[str, Any] = {
+        "mean_ms": float(arr.mean()),
         "p50_ms": float(np.percentile(arr, 50)),
         "p95_ms": float(np.percentile(arr, 95)),
     }
+    if model_path is not None and model_path.exists():
+        result["model_size_mb"] = model_path.stat().st_size / (1024 * 1024)
+    else:
+        result["model_size_mb"] = None
+    return result
 
 
 def main() -> None:
     args = parse_args()
-
-    checkpoint = load_checkpoint(args.ckpt)
-    model_cfg = dict(checkpoint.get("model_config", {}))
-    feature_cfg = dict(checkpoint.get("feature_config", {}))
-    data_cfg = dict(checkpoint.get("data_config", {}))
-    model_cfg.setdefault("name", "small_cnn")
-    model_cfg = normalize_model_config(model_cfg, feature_cfg)
-
-    model = build_model(model_cfg, feature_cfg)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
-
-    # Derive exact feature shape from config (same path as export_onnx)
-    num_samples = int(data_cfg.get("num_samples", 16_000))
-    extractor = LogMelExtractor(**feature_cfg).eval()
-    with torch.no_grad():
-        dummy_torch = extractor(torch.zeros(1, 1, num_samples, dtype=torch.float32))
-    dummy_np = dummy_torch.numpy()
-
-    pytorch_times = benchmark_pytorch(model, dummy_torch, args.warmup, args.repeat)
-    pytorch_metrics = compute_metrics(pytorch_times)
-    pytorch_metrics["model_size_mb"] = round(Path(args.ckpt).stat().st_size / (1024 * 1024), 2)
-
-    session_fp32 = ort.InferenceSession(args.onnx, providers=["CPUExecutionProvider"])
-    onnx_times = benchmark_onnx(session_fp32, dummy_np, args.warmup, args.repeat)
-    onnx_metrics = compute_metrics(onnx_times)
-    onnx_metrics["model_size_mb"] = round(Path(args.onnx).stat().st_size / (1024 * 1024), 2)
-
-    session_int8 = ort.InferenceSession(args.onnx_int8, providers=["CPUExecutionProvider"])
-    int8_times = benchmark_onnx(session_int8, dummy_np, args.warmup, args.repeat)
-    int8_metrics = compute_metrics(int8_times)
-    int8_metrics["model_size_mb"] = round(Path(args.onnx_int8).stat().st_size / (1024 * 1024), 2)
-
-    results = {
-        "pytorch_fp32": pytorch_metrics,
-        "onnx_fp32": onnx_metrics,
-        "onnx_int8": int8_metrics,
-    }
-
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
 
-    print(f"saved latency results: {output_path}")
-    for key, metrics in results.items():
-        print(
-            f"{key}: "
-            f"mean={metrics['mean_ms']:.3f}ms "
-            f"p50={metrics['p50_ms']:.3f}ms "
-            f"p95={metrics['p95_ms']:.3f}ms "
-            f"size={metrics['model_size_mb']:.2f}MB"
-        )
+    checkpoint = load_checkpoint(args.ckpt)
+    pt_model, pt_dummy = build_pytorch_model(checkpoint)
+
+    print(f"benchmark input shape: {INPUT_SHAPE}")
+    print(f"warmup={args.warmup}, repeat={args.repeat}")
+
+    pt_times = benchmark_pytorch(pt_model, pt_dummy, args.warmup, args.repeat)
+    onnx_times = benchmark_onnx(Path(args.onnx), args.warmup, args.repeat)
+    int8_times = benchmark_onnx(Path(args.onnx_int8), args.warmup, args.repeat)
+
+    latency = {
+        "pytorch_fp32": summarize(pt_times, Path(args.ckpt)),
+        "onnx_fp32": summarize(onnx_times, Path(args.onnx)),
+        "onnx_int8": summarize(int8_times, Path(args.onnx_int8)),
+        "metadata": {
+            "input_shape": list(INPUT_SHAPE),
+            "warmup": args.warmup,
+            "repeat": args.repeat,
+            "num_parameters": count_parameters(pt_model),
+            "device": "cpu",
+        },
+    }
+
+    with output_path.open("w", encoding="utf-8") as file:
+        json.dump(latency, file, indent=2)
+
+    print(f"pytorch_fp32: mean={latency['pytorch_fp32']['mean_ms']:.4f} ms, "
+          f"p50={latency['pytorch_fp32']['p50_ms']:.4f} ms, "
+          f"p95={latency['pytorch_fp32']['p95_ms']:.4f} ms")
+    print(f"onnx_fp32:    mean={latency['onnx_fp32']['mean_ms']:.4f} ms, "
+          f"p50={latency['onnx_fp32']['p50_ms']:.4f} ms, "
+          f"p95={latency['onnx_fp32']['p95_ms']:.4f} ms")
+    print(f"onnx_int8:    mean={latency['onnx_int8']['mean_ms']:.4f} ms, "
+          f"p50={latency['onnx_int8']['p50_ms']:.4f} ms, "
+          f"p95={latency['onnx_int8']['p95_ms']:.4f} ms")
+    print(f"saved latency: {output_path}")
 
 
 if __name__ == "__main__":

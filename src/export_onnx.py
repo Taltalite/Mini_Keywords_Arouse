@@ -17,7 +17,7 @@ from src.models import build_model, count_parameters, normalize_model_config
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export PyTorch KWS checkpoint to ONNX.")
     parser.add_argument("--ckpt", required=True, help="Checkpoint path, e.g. outputs/best.pt.")
-    parser.add_argument("--config", default=None, help="Optional YAML config override.")
+    parser.add_argument("--config", default=None, help="Optional YAML config to override checkpoint config.")
     parser.add_argument("--out", required=True, help="Output ONNX path, e.g. outputs/model.onnx.")
     parser.add_argument("--opset", type=int, default=17, help="ONNX opset version.")
     return parser.parse_args()
@@ -82,23 +82,28 @@ def run_onnx_validation(
     }
 
 
+def _merge_config(args_config: dict[str, Any] | None, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    """Merge checkpoint config with optional command-line YAML config.
+
+    Command-line values take precedence over checkpoint values.
+    """
+    args_config = args_config or {}
+    merged: dict[str, Any] = {}
+    for section in ("data", "features", "model", "train"):
+        merged[section] = dict(checkpoint.get(f"{section}_config", {}))
+        merged[section].update(args_config.get(section, {}))
+    return merged
+
+
 def main() -> None:
     args = parse_args()
     checkpoint = load_checkpoint(args.ckpt)
+    args_config = load_config(args.config) if args.config is not None else None
+    config = _merge_config(args_config, checkpoint)
 
-    feature_cfg = dict(checkpoint.get("feature_config", {}))
-    data_cfg = dict(checkpoint.get("data_config", {}))
-    model_cfg = dict(checkpoint.get("model_config", {}))
-
-    if args.config is not None:
-        import yaml
-
-        with Path(args.config).open("r", encoding="utf-8") as f:
-            external = yaml.safe_load(f) or {}
-        feature_cfg.update(dict(external.get("features", {})))
-        data_cfg.update(dict(external.get("data", {})))
-        model_cfg.update(dict(external.get("model", {})))
-
+    feature_cfg = config["features"]
+    data_cfg = config["data"]
+    model_cfg = config["model"]
     model_cfg.setdefault("name", "small_cnn")
     model_cfg = normalize_model_config(model_cfg, feature_cfg)
 
@@ -116,6 +121,9 @@ def main() -> None:
 
     check = {
         "ckpt": str(Path(args.ckpt)),
+
+        "config": str(Path(args.config)) if args.config is not None else None,
+
         "onnx_path": str(output_path),
         "opset": args.opset,
         "feature_input_shape": list(dummy_features.shape),

@@ -208,7 +208,13 @@ def main() -> None:
             json.dump(silence_analysis, file, indent=2)
 
     metrics_path = output_dir / "metrics.json"
-    metrics = {}
+    metrics: dict[str, Any] = {}
+    if metrics_path.exists():
+        try:
+            with metrics_path.open("r", encoding="utf-8") as file:
+                metrics = json.load(file)
+        except (json.JSONDecodeError, OSError):
+            metrics = {}
     metrics["output_dir"] = str(output_dir)
     metrics["macro_accuracy"] = macro_accuracy
     metrics["target_keyword_macro_accuracy"] = target_keyword_macro_accuracy
